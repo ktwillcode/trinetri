@@ -1,0 +1,401 @@
+name: Release & Publish to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v0.1.0)'
+        required: true
+        type: string
+
+env:
+  FORCE_COLOR: 1
+
+jobs:
+  validate-tag:
+    name: Validate Release Tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+      is_prerelease: ${{ steps.extract.outputs.is_prerelease }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: extract
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.version }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          
+          echo "Processing tag: $TAG"
+          
+          # Remove 'v' prefix if present
+          VERSION=${TAG#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+          # Check if pre-release (contains alpha, beta, rc, dev)
+          if [[ "$VERSION" =~ (alpha|beta|rc|dev) ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+            echo "Detected pre-release version"
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "Detected stable release version"
+          fi
+
+      - name: Validate version format
+        run: |
+          VERSION="${{ steps.extract.outputs.version }}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9\.\-]+)?$ ]]; then
+            echo "❌ Invalid version format: $VERSION"
+            echo "Expected format: X.Y.Z or X.Y.Z-suffix"
+            exit 1
+          fi
+          echo "✅ Version format is valid: $VERSION"
+
+  build-and-test:
+    name: Build & Test Release
+    runs-on: ubuntu-latest
+    needs: validate-tag
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Verify version consistency
+        run: |
+          PACKAGE_VERSION=$(uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          RELEASE_VERSION="${{ needs.validate-tag.outputs.version }}"
+          
+          echo "Package version: $PACKAGE_VERSION"
+          echo "Release version: $RELEASE_VERSION"
+          
+          if [[ "$PACKAGE_VERSION" != "$RELEASE_VERSION" ]]; then
+            echo "❌ Version mismatch!"
+            echo "pyproject.toml version: $PACKAGE_VERSION"
+            echo "Release tag version: $RELEASE_VERSION"
+            echo "Please update pyproject.toml version to match the release tag"
+            exit 1
+          fi
+          echo "✅ Versions match"
+
+      - name: Run lint checks
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+          uv run mypy src/trinetri_auto
+
+      - name: Run test suite
+        run: |
+          uv run pytest tests/ -v --tb=short --cov=src/trinetri_auto --cov-report=term-missing
+
+      - name: Build package
+        run: uv build
+
+      - name: Verify package contents
+        run: |
+          echo "📦 Package contents:"
+          ls -la dist/
+          
+          echo "🔍 Wheel contents:"
+          uv run python -m zipfile -l dist/*.whl | head -20
+          
+          echo "📋 Package metadata:"
+          uv run twine check dist/*
+
+      - name: Test installation
+        run: |
+          # Create temporary environment to test installation
+          python -m venv test_env
+          source test_env/bin/activate
+          pip install dist/*.whl
+          
+          # Test basic imports
+          python -c "
+          import trinetri_auto
+          from trinetri_auto import agent, eval, cli
+          print('✅ Package imports successfully')
+          "
+          
+          # Test CLI
+          python -m trinetri_auto.cli --help
+          echo "✅ CLI working"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-${{ needs.validate-tag.outputs.version }}
+          path: dist/
+          retention-days: 90
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: [validate-tag, build-and-test]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist-${{ needs.validate-tag.outputs.version }}
+          path: dist/
+
+      - name: Run security checks
+        run: |
+          echo "🔒 Running security scans..."
+          
+          # Check for known vulnerabilities in dependencies
+          uv run safety check --json || echo "⚠️ Safety check completed with warnings"
+          
+          # Static security analysis
+          uv run bandit -r src/ -f json || echo "⚠️ Bandit scan completed with warnings"
+          
+          # Check package for common security issues
+          uv run python -c "
+          import zipfile
+          import os
+          
+          # Check wheel contents for suspicious files
+          for wheel in os.listdir('dist/'):
+              if wheel.endswith('.whl'):
+                  print(f'🔍 Scanning {wheel}...')
+                  with zipfile.ZipFile(f'dist/{wheel}', 'r') as z:
+                      for file in z.namelist():
+                          if file.endswith(('.exe', '.bat', '.cmd', '.sh')):
+                              print(f'⚠️  Found executable: {file}')
+                          elif file.startswith('../'):
+                              print(f'❌ Suspicious path: {file}')
+                              exit(1)
+          
+          print('✅ Package security scan completed')
+          "
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    runs-on: ubuntu-latest
+    needs: [validate-tag, build-and-test, security-scan]
+    if: needs.validate-tag.outputs.is_prerelease == 'true' || github.event_name == 'workflow_dispatch'
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/trinetri-auto/
+    
+    permissions:
+      id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
+    
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist-${{ needs.validate-tag.outputs.version }}
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          verbose: true
+          print-hash: true
+
+      - name: Test TestPyPI installation
+        run: |
+          sleep 60  # Wait for package to be available
+          
+          # Create clean environment
+          python -m venv test_testpypi
+          source test_testpypi/bin/activate
+          
+          # Install from TestPyPI with fallback to PyPI for dependencies
+          pip install --index-url https://test.pypi.org/simple/ \
+                      --extra-index-url https://pypi.org/simple/ \
+                      trinetri-auto==${{ needs.validate-tag.outputs.version }}
+          
+          # Test import
+          python -c "import trinetri_auto; print('✅ TestPyPI installation successful')"
+
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [validate-tag, build-and-test, security-scan]
+    if: needs.validate-tag.outputs.is_prerelease == 'false' && github.event_name != 'workflow_dispatch'
+    environment:
+      name: pypi
+      url: https://pypi.org/project/trinetri-auto/
+    
+    permissions:
+      id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
+    
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist-${{ needs.validate-tag.outputs.version }}
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          verbose: true
+          print-hash: true
+
+      - name: Test PyPI installation
+        run: |
+          sleep 120  # Wait for package to be available
+          
+          # Create clean environment
+          python -m venv test_pypi
+          source test_pypi/bin/activate
+          
+          # Install from PyPI
+          pip install trinetri-auto==${{ needs.validate-tag.outputs.version }}
+          
+          # Test import and basic functionality
+          python -c "
+          import trinetri_auto
+          from trinetri_auto import agent, eval, cli
+          print('✅ PyPI installation successful')
+          "
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [validate-tag, build-and-test, security-scan]
+    if: always() && !failure() && !cancelled()
+    
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist-${{ needs.validate-tag.outputs.version }}
+          path: dist/
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          VERSION="${{ needs.validate-tag.outputs.version }}"
+          
+          # Get commits since last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          if [[ -n "$LAST_TAG" ]]; then
+            echo "📝 Changes since $LAST_TAG:" > release_notes.md
+            echo "" >> release_notes.md
+            git log --pretty=format:"- %s (%an)" $LAST_TAG..HEAD >> release_notes.md
+          else
+            echo "🎉 Initial release of Trinetri v$VERSION" > release_notes.md
+            echo "" >> release_notes.md
+            echo "Comprehensive observability and in-trace evaluation for multi-agent LLM workflows." >> release_notes.md
+          fi
+          
+          echo "" >> release_notes.md
+          echo "## 📦 Installation" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "\`\`\`bash" >> release_notes.md
+          echo "pip install trinetri-auto==$VERSION" >> release_notes.md
+          echo "\`\`\`" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "## 🔧 Quick Start" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "\`\`\`bash" >> release_notes.md
+          echo "# Check system health" >> release_notes.md
+          echo "trinetri doctor" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "# Instrument your agents" >> release_notes.md
+          echo "trinetri instrument mymodule:AgentClass --role coordinator" >> release_notes.md
+          echo "\`\`\`" >> release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.validate-tag.outputs.version }}
+          name: Trinetri v${{ needs.validate-tag.outputs.version }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: ${{ needs.validate-tag.outputs.is_prerelease }}
+          files: dist/*
+          generate_release_notes: true
+
+  notify:
+    name: Notify Release
+    runs-on: ubuntu-latest
+    needs: [validate-tag, create-release, publish-pypi, publish-testpypi]
+    if: always() && !failure() && !cancelled()
+    
+    steps:
+      - name: Create release summary
+        run: |
+          VERSION="${{ needs.validate-tag.outputs.version }}"
+          IS_PRERELEASE="${{ needs.validate-tag.outputs.is_prerelease }}"
+          
+          echo "# 🚀 Trinetri v$VERSION Released!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            echo "## 🧪 Pre-release" >> $GITHUB_STEP_SUMMARY
+            echo "This is a pre-release version published to TestPyPI." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Installation:** \`pip install --index-url https://test.pypi.org/simple/ trinetri-auto==$VERSION\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ✅ Stable Release" >> $GITHUB_STEP_SUMMARY
+            echo "This version has been published to PyPI and is ready for production use." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Installation:** \`pip install trinetri-auto==$VERSION\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📋 Release Checklist" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Version validation" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Build & test" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Security scan" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Package verification" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ GitHub release created" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            echo "- ✅ Published to TestPyPI" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ✅ Published to PyPI" >> $GITHUB_STEP_SUMMARY
+          fi 

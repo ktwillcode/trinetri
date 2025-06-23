@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # OpenTelemetry Collector for trace ingestion and processing
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.103.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8888:8888"   # Prometheus metrics
+      - "8889:8889"   # Prometheus exporter metrics
+    depends_on:
+      - tempo
+      - postgres
+    restart: unless-stopped
+
+  # Grafana Tempo for trace storage and querying
+  tempo:
+    image: grafana/tempo:v2.5.0
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml
+      - tempo-data:/tmp/tempo
+    ports:
+      - "3200:3200"   # Tempo query frontend
+      - "9095:9095"   # Tempo gRPC
+    restart: unless-stopped
+
+  # PostgreSQL for dense span storage (Trinetri dual-path approach)
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: trinetri
+      POSTGRES_USER: trinetri
+      POSTGRES_PASSWORD: trinetri_pass
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  # Grafana for visualization (optional)
+  grafana:
+    image: grafana/grafana:10.4.0
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+    ports:
+      - "3000:3000"
+    depends_on:
+      - tempo
+      - postgres
+    restart: unless-stopped
+
+volumes:
+  tempo-data:
+  postgres-data:
+  grafana-data: 

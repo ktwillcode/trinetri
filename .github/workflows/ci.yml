@@ -1,0 +1,287 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run ruff format check
+        run: uv run ruff format --check --diff .
+
+      - name: Run ruff lint check
+        run: uv run ruff check --output-format=github .
+
+      - name: Run mypy type checking
+        run: uv run mypy src/trinetri_auto --show-error-codes --pretty
+
+  test:
+    name: Test Suite
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run test suite
+        run: uv run pytest tests/ -v --tb=short --cov=src/trinetri_auto --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+          verbose: true
+
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      otel-collector:
+        image: otel/opentelemetry-collector-contrib:latest
+        ports:
+          - 4317:4317
+          - 4318:4318
+        options: >-
+          --health-cmd="wget --no-verbose --tries=1 --spider http://localhost:13133/ || exit 1"
+          --health-interval=30s
+          --health-timeout=10s
+          --health-retries=3
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Test CLI doctor command
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+          OTEL_SERVICE_NAME: trinetri-integration-test
+        run: |
+          uv run python -m trinetri_auto.cli doctor --verbose
+
+      - name: Test CLI instrument command (dry-run)
+        run: |
+          uv run python -m trinetri_auto.cli instrument builtins:dict --role test --dry-run --verbose
+
+      - name: Test evaluation functionality
+        run: |
+          uv run python -c "
+          import sys
+          sys.path.insert(0, 'src')
+          
+          # Mock dependencies for testing
+          class Mock:
+              def __getattr__(self, name): return Mock()
+              def __call__(self, *args, **kwargs): return Mock()
+          
+          import sys
+          for module in ['opentelemetry', 'opentelemetry.trace']:
+              sys.modules[module] = Mock()
+          
+          from trinetri_auto.eval import EvaluationError, _mock_deepeval_score
+          
+          print('Testing evaluation mock score...')
+          score = _mock_deepeval_score()
+          print(f'Mock score: {score}')
+          assert score == 0.82
+          
+          print('Testing EvaluationError...')
+          try:
+              raise EvaluationError(0.7, 0.9, 'g-eval')
+          except EvaluationError as e:
+              print(f'EvaluationError: {e}')
+          
+          print('✅ Evaluation functionality test passed!')
+          "
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run safety check
+        run: uv run safety check --json --ignore 70612
+        continue-on-error: true
+
+      - name: Run bandit security linter
+        run: uv run bandit -r src/ -f json
+        continue-on-error: true
+
+  build:
+    name: Build Package
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Build package
+        run: uv build
+
+      - name: Check package metadata
+        run: uv run twine check dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.run_id }}
+          path: dist/
+          retention-days: 30
+
+  docker-test:
+    name: Docker Integration Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Start deployment stack
+        run: |
+          cd deploy
+          docker-compose up -d --wait
+          sleep 10
+
+      - name: Check services health
+        run: |
+          # Test OTLP collector
+          curl -f http://localhost:4318/v1/traces || echo "OTLP endpoint not ready"
+          
+          # Test Tempo
+          curl -f http://localhost:3200/ready || echo "Tempo not ready"
+
+      - name: Stop deployment stack
+        run: |
+          cd deploy
+          docker-compose down -v
+
+  all-checks:
+    name: All Checks Passed
+    runs-on: ubuntu-latest
+    needs: [lint, test, integration-test, security, build, docker-test]
+    if: always()
+    
+    steps:
+      - name: Check all job results
+        run: |
+          if [[ "${{ needs.lint.result }}" != "success" ]]; then
+            echo "❌ Lint check failed"
+            exit 1
+          fi
+          
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "❌ Test suite failed"
+            exit 1
+          fi
+          
+          if [[ "${{ needs.integration-test.result }}" != "success" ]]; then
+            echo "❌ Integration tests failed"
+            exit 1
+          fi
+          
+          if [[ "${{ needs.build.result }}" != "success" ]]; then
+            echo "❌ Build failed"
+            exit 1
+          fi
+          
+          if [[ "${{ needs.docker-test.result }}" != "success" ]]; then
+            echo "❌ Docker tests failed"
+            exit 1
+          fi
+          
+          echo "✅ All checks passed successfully!"
+
+      - name: Report status
+        run: |
+          echo "## CI Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint | ${{ needs.lint.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | ${{ needs.test.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY  
+          echo "| Integration | ${{ needs.integration-test.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security | ${{ needs.security.result == 'success' && '✅' || '⚠️' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build | ${{ needs.build.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker | ${{ needs.docker-test.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY 

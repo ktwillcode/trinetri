@@ -1,0 +1,152 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - http://localhost:3000
+            - http://localhost:8080
+
+processors:
+  # Batch processor for efficient data transmission
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  # Memory limiter to prevent OOM
+  memory_limiter:
+    limit_mib: 512
+
+  # Tail sampling processor - key component for Trinetri dual-path approach
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 50000
+    expected_new_traces_per_sec: 10
+    policies:
+      # Policy 1: Always sample root spans (for APM tools like Datadog/Grafana)
+      - name: root_spans
+        type: string_attribute
+        string_attribute:
+          key: span.type
+          values:
+            - root
+          invert_match: false
+
+      # Policy 2: Always sample tool spans (LLM calls, HTTP requests)
+      - name: tool_spans  
+        type: string_attribute
+        string_attribute:
+          key: span.type
+          values:
+            - tool
+          invert_match: false
+
+      # Policy 3: Always sample evaluation summary spans
+      - name: eval_spans
+        type: string_attribute
+        string_attribute:
+          key: span.type
+          values:
+            - eval
+            - eval_summary
+          invert_match: false
+
+      # Policy 4: Sample errors regardless of span type
+      - name: error_spans
+        type: status_code
+        status_code:
+          status_codes:
+            - ERROR
+
+      # Policy 5: Probabilistic sampling for other spans (dense data)
+      # These will be filtered out for APM but kept for local storage
+      - name: probabilistic_sampling
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 1  # Only 1% of other spans
+
+  # Resource processor to add deployment info
+  resource:
+    attributes:
+      - key: service.name
+        value: "trinetri"
+        action: upsert
+      - key: service.version
+        value: "0.1.0"
+        action: upsert
+      - key: deployment.environment
+        value: "development"
+        action: upsert
+
+  # Attributes processor for span enrichment
+  attributes:
+    actions:
+      # Ensure span.type exists (default to "unknown")
+      - key: span.type
+        value: "unknown"
+        action: upsert
+      # Add timestamp for easier querying
+      - key: processed_at
+        value: "${NOW}"
+        action: upsert
+
+exporters:
+  # Export to Grafana Tempo for root/tool/eval spans
+  otlp/tempo:
+    endpoint: http://tempo:4317
+    tls:
+      insecure: true
+    sending_queue:
+      num_consumers: 4
+      queue_size: 100
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+  # Export to PostgreSQL for dense span storage
+  # Note: This would require a custom exporter or intermediate service
+  # For Phase 1, we'll log to file and process separately
+  file:
+    path: /tmp/trinetri-dense-spans.jsonl
+    rotation:
+      max_megabytes: 100
+      max_days: 7
+      max_backups: 3
+
+  # Prometheus metrics exporter
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    send_timestamps: true
+    metric_expiration: 180m
+
+  # Debug logging (disable in production)
+  logging:
+    loglevel: info
+    verbosity: normal
+
+service:
+  extensions: []
+  pipelines:
+    # Main traces pipeline with tail sampling
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, tail_sampling, resource, attributes, batch]
+      exporters: [otlp/tempo, file, logging]
+
+    # Metrics pipeline
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus]
+
+  telemetry:
+    logs:
+      level: "info"
+    metrics:
+      address: 0.0.0.0:8888 

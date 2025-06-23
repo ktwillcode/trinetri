@@ -1,0 +1,676 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Trinetri Multi-Agent LLM Observability v0.1",
+    "description": "Comprehensive observability dashboard for multi-agent LLM workflows with evaluation monitoring and cost analysis",
+    "tags": [
+      "trinetri",
+      "llm",
+      "multi-agent",
+      "observability",
+      "evaluation",
+      "cost-optimization"
+    ],
+    "style": "dark",
+    "timezone": "",
+    "editable": true,
+    "hideControls": false,
+    "sharedCrosshair": true,
+    "panels": [
+      {
+        "id": 1,
+        "title": "Trace Waterfall - Agent Correlation View",
+        "description": "TraceQL filtered waterfall view showing spans by correlation ID for multi-agent workflow tracing",
+        "type": "traces",
+        "targets": [
+          {
+            "queryType": "traceql",
+            "query": "{ agent.correlation_id != \"\" } | select(.agent.correlation_id, .span.type, .service.name, .operationName)",
+            "datasource": {
+              "type": "tempo",
+              "uid": "tempo"
+            },
+            "limit": 50,
+            "spansLimit": 5000
+          }
+        ],
+        "gridPos": {
+          "h": 14,
+          "w": 24,
+          "x": 0,
+          "y": 0
+        },
+        "options": {
+          "showTraceId": true,
+          "showSpanId": true,
+          "showTime": true,
+          "showDuration": true,
+          "showTags": true,
+          "showLogs": true,
+          "showStackTraces": false,
+          "columns": [
+            "traceID",
+            "startTime",
+            "duration",
+            "agent.correlation_id",
+            "span.type",
+            "operationName",
+            "service.name"
+          ]
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "vis": false
+              }
+            }
+          }
+        },
+        "transformations": [
+          {
+            "id": "filterFieldsByName",
+            "options": {
+              "include": {
+                "names": [
+                  "traceID",
+                  "startTime", 
+                  "duration",
+                  "agent.correlation_id",
+                  "span.type",
+                  "operationName",
+                  "service.name",
+                  "status.code"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Evaluation Success Rate (%)",
+        "description": "Gauge showing percentage of evaluations that passed threshold (eval.pass=true)",
+        "type": "gauge",
+        "targets": [
+          {
+            "queryType": "traceql",
+            "query": "{ span.type=\"eval\" }",
+            "datasource": {
+              "type": "tempo",
+              "uid": "tempo"
+            },
+            "legendFormat": "Pass Rate"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 8,
+          "x": 0,
+          "y": 14
+        },
+        "options": {
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": ""
+          },
+          "orientation": "auto",
+          "textMode": "auto",
+          "colorMode": "value",
+          "graphMode": "area",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 100,
+            "unit": "percent",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "red",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 70
+                },
+                {
+                  "color": "green",
+                  "value": 85
+                }
+              ]
+            },
+            "color": {
+              "mode": "thresholds"
+            },
+            "mappings": [
+              {
+                "options": {
+                  "match": "null",
+                  "result": {
+                    "text": "N/A"
+                  }
+                },
+                "type": "special"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Cost vs Latency Analysis (Root Spans)",
+        "description": "Bar chart showing cost_usd and latency_ms for root spans by service",
+        "type": "barchart",
+        "targets": [
+          {
+            "queryType": "traceql",
+            "query": "{ span.type=\"root\" } | select(.service.name, .cost_usd, .latency_ms)",
+            "datasource": {
+              "type": "tempo",
+              "uid": "tempo"
+            },
+            "legendFormat": "{{service_name}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 16,
+          "x": 8,
+          "y": 14
+        },
+        "options": {
+          "orientation": "horizontal",
+          "legend": {
+            "displayMode": "visible",
+            "placement": "right",
+            "calcs": ["mean", "max"]
+          },
+          "tooltip": {
+            "mode": "multi"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "vis": false
+              }
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow", 
+                  "value": 0.01
+                },
+                {
+                  "color": "red",
+                  "value": 0.10
+                }
+              ]
+            },
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "currencyUSD"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "latency_ms"
+              },
+              "properties": [
+                {
+                  "id": "unit",
+                  "value": "ms"
+                },
+                {
+                  "id": "custom.axisPlacement",
+                  "value": "right"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": 4,
+        "title": "Agent Activity Timeline",
+        "description": "Time series showing agent execution rate by role",
+        "type": "timeseries",
+        "targets": [
+          {
+            "queryType": "traceql",
+            "query": "{ span.type=\"agent\" } | rate() by (agent.role)",
+            "datasource": {
+              "type": "tempo", 
+              "uid": "tempo"
+            },
+            "legendFormat": "{{agent.role}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 22
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "calcs": [
+              "lastNotNull",
+              "max",
+              "mean"
+            ]
+          },
+          "tooltip": {
+            "mode": "multi"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "lineWidth": 2,
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "spanNulls": false,
+              "insertNulls": false,
+              "showPoints": "never",
+              "pointSize": 5,
+              "stacking": {
+                "mode": "none",
+                "group": "A"
+              },
+              "axisPlacement": "auto",
+              "axisLabel": "Executions/sec",
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "vis": false
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "ops"
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "LLM Token Usage & Cost Breakdown",
+        "description": "Pie chart showing token distribution across LLM models",
+        "type": "piechart",
+        "targets": [
+          {
+            "queryType": "traceql",
+            "query": "{ span.type=\"llm\" } | by(.llm.model)",
+            "datasource": {
+              "type": "tempo",
+              "uid": "tempo"
+            },
+            "legendFormat": "{{llm.model}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 22
+        },
+        "options": {
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": ""
+          },
+          "pieType": "pie",
+          "tooltip": {
+            "mode": "single"
+          },
+          "legend": {
+            "displayMode": "visible",
+            "placement": "right",
+            "calcs": ["sum", "percent"]
+          },
+          "displayLabels": [
+            "name",
+            "percent"
+          ]
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "vis": false
+              }
+            },
+            "unit": "short",
+            "decimals": 0
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Error Rate by Component",
+        "description": "Error percentage breakdown by span type",
+        "type": "stat",
+        "targets": [
+          {
+            "queryType": "traceql",
+            "query": "{ status.code=\"ERROR\" } | by(.span.type)",
+            "datasource": {
+              "type": "tempo",
+              "uid": "tempo"
+            },
+            "legendFormat": "{{span.type}}"
+          }
+        ],
+        "gridPos": {
+          "h": 6,
+          "w": 24,
+          "x": 0,
+          "y": 30
+        },
+        "options": {
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": ""
+          },
+          "orientation": "horizontal",
+          "textMode": "auto",
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            },
+            "color": {
+              "mode": "thresholds"
+            }
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Step ID Distribution",
+        "description": "Unique step IDs over time for workflow tracking",
+        "type": "timeseries",
+        "targets": [
+          {
+            "queryType": "traceql",
+            "query": "{ step_id != \"\" } | by(.step_id)",
+            "datasource": {
+              "type": "tempo",
+              "uid": "tempo"
+            },
+            "legendFormat": "Unique Steps"
+          }
+        ],
+        "gridPos": {
+          "h": 6,
+          "w": 12,
+          "x": 0,
+          "y": 36
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "linear",
+              "lineWidth": 2,
+              "fillOpacity": 20,
+              "gradientMode": "opacity"
+            },
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "short"
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Evaluation Metrics Summary",
+        "description": "Summary of evaluation scores and pass/fail rates",
+        "type": "table",
+        "targets": [
+          {
+            "queryType": "traceql",
+            "query": "{ span.type=\"eval\" } | select(.eval.metric, .eval.score, .eval.pass)",
+            "datasource": {
+              "type": "tempo",
+              "uid": "tempo"
+            }
+          }
+        ],
+        "gridPos": {
+          "h": 6,
+          "w": 12,
+          "x": 12,
+          "y": 36
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "align": "auto",
+              "cellOptions": {
+                "type": "auto"
+              },
+              "inspect": false
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            }
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "eval.pass"
+              },
+              "properties": [
+                {
+                  "id": "custom.cellOptions",
+                  "value": {
+                    "type": "color-background"
+                  }
+                },
+                {
+                  "id": "thresholds",
+                  "value": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "red",
+                        "value": null
+                      },
+                      {
+                        "color": "green",
+                        "value": 1
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "timepicker": {
+      "refresh_intervals": [
+        "5s",
+        "10s",
+        "30s",
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "2h",
+        "1d"
+      ],
+      "time_options": [
+        "5m",
+        "15m",
+        "1h",
+        "6h",
+        "12h",
+        "24h",
+        "2d",
+        "7d",
+        "30d"
+      ]
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "correlation_id",
+          "type": "textbox",
+          "label": "Correlation ID Filter",
+          "description": "Filter traces by specific correlation ID",
+          "current": {
+            "selected": false,
+            "text": "",
+            "value": ""
+          },
+          "hide": 0,
+          "options": []
+        },
+        {
+          "name": "service_name", 
+          "type": "textbox",
+          "label": "Service Name Filter",
+          "description": "Filter by specific service name",
+          "current": {
+            "selected": false,
+            "text": "",
+            "value": ""
+          },
+          "hide": 0,
+          "options": []
+        },
+        {
+          "name": "agent_role",
+          "type": "textbox", 
+          "label": "Agent Role Filter",
+          "description": "Filter by specific agent role",
+          "current": {
+            "selected": false,
+            "text": "",
+            "value": ""
+          },
+          "hide": 0,
+          "options": []
+        }
+      ]
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Evaluation Failures",
+          "enable": true,
+          "iconColor": "red",
+          "query": "{ span.type=\"eval\" && eval.pass=\"false\" }",
+          "textColumn": "eval.metric",
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          }
+        },
+        {
+          "name": "High Cost Operations",
+          "enable": true,
+          "iconColor": "orange",
+          "query": "{ cost_usd > 0.10 }",
+          "textColumn": "service.name",
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          }
+        }
+      ]
+    },
+    "refresh": "30s",
+    "version": 1,
+    "links": [
+      {
+        "title": "Trinetri GitHub",
+        "url": "https://github.com/user/trinetri",
+        "type": "link"
+      },
+      {
+        "title": "Documentation",
+        "url": "https://docs.trinetri.dev",
+        "type": "link"
+      }
+    ]
+  }
+} 

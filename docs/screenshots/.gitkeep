@@ -1,0 +1,14 @@
+# Screenshots Directory
+
+This directory contains screenshots referenced in the documentation.
+
+Screenshots to be added:
+- docker-compose-services.png
+- trinetri-doctor-success.png  
+- demo-execution.png
+- grafana-login.png
+- grafana-dashboard-overview.png
+- span-attributes-detail.png
+- success-celebration.png
+
+These will be captured during actual usage and testing of the Trinetri system. 
